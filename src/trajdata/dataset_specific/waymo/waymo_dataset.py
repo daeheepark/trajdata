@@ -312,17 +312,18 @@ class WaymoDataset(RawDataset):
             scene,
         )
 
-        tls_dict = waymo_utils.extract_traffic_lights(
-            dynamic_states=scenario.dynamic_map_states
-        )
-        tls_df = pd.DataFrame(
-            tls_dict.values(),
-            index=pd.MultiIndex.from_tuples(
-                tls_dict.keys(), names=["lane_id", "scene_ts"]
-            ),
-            columns=["status"],
-        )
-        cache_class.save_traffic_light_data(tls_df, cache_path, scene)
+        # TODO: traffic light is not working with different dt! Until it is repaired, comment this out.
+        # tls_dict = waymo_utils.extract_traffic_lights(
+        #     dynamic_states=scenario.dynamic_map_states
+        # )
+        # tls_df = pd.DataFrame(
+        #     tls_dict.values(),
+        #     index=pd.MultiIndex.from_tuples(
+        #         tls_dict.keys(), names=["lane_id", "scene_ts"]
+        #     ),
+        #     columns=["status"],
+        # )
+        # cache_class.save_traffic_light_data(tls_df, cache_path, scene)
 
         return agent_list, agent_presence
 
@@ -334,7 +335,7 @@ class WaymoDataset(RawDataset):
         map_params: Dict[str, Any],
     ):
         dataset = tf.data.TFRecordDataset(
-            [self.dataset_obj.get_filename(data_idx)], compression_type=""
+            [str(self.dataset_obj.get_filename(data_idx))], compression_type=""
         )
 
         scenario: Scenario = Scenario()

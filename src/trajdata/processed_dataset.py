@@ -3,7 +3,7 @@ import random
 import time
 from collections import defaultdict
 from functools import partial
-from itertools import chain
+from itertools import chain, compress, islice
 from os.path import isfile
 from pathlib import Path
 from typing import (
@@ -20,10 +20,15 @@ from typing import (
 )
 
 import dill
+import ray
 import numpy as np
+import torch
 from torch import distributed
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+import parmap
+
+from multiprocessing import Process, Pool
 
 from trajdata import filtering
 from trajdata.augmentation.augmentation import Augmentation, BatchAugmentation
@@ -56,11 +61,12 @@ from trajdata.utils.parallel_utils import parallel_iapply
 DEFAULT_PX_PER_M: Final[float] = 2.0
 
 
-class UnifiedDataset(Dataset):
+class ProcessedUnifiedDataset(Dataset):
     # @profile
     def __init__(
         self,
         desired_data: List[str],
+        model_desc: str,
         scene_description_contains: Optional[List[str]] = None,
         centric: str = "agent",
         desired_dt: Optional[float] = None,
@@ -84,8 +90,8 @@ class UnifiedDataset(Dataset):
         only_types: Optional[List[AgentType]] = None,
         only_predict: Optional[List[AgentType]] = None,
         no_types: Optional[List[AgentType]] = None,
-        state_format: str = "x,y,xd,yd,xdd,ydd,h",
-        obs_format: str = "x,y,xd,yd,xdd,ydd,s,c",
+        state_format: str = "x,y,z,xd,yd,xdd,ydd,h",
+        obs_format: str = "x,y,z,xd,yd,xdd,ydd,s,c,h",
         standardize_data: bool = True,
         standardize_derivatives: bool = False,
         augmentations: Optional[List[Augmentation]] = None,
@@ -124,6 +130,7 @@ class UnifiedDataset(Dataset):
 
         Args:
             desired_data (List[str]): Names of datasets, splits, scene tags, etc. See the README for more information.
+            model_desc (str): Description of processing method.
             scene_description_contains (Optional[List[str]], optional): Only return data from scenes whose descriptions contain one or more of these strings. Defaults to None.
             centric (str, optional): One of {"agent", "scene"}, specifies what a batch element contains data for (one agent at one timestep or all agents in a scene at one timestep). Defaults to "agent".
             desired_dt (Optional[float], optional): Specifies the desired data sampling rate, an error will be raised if the original and desired data sampling rate are not integer multiples of each other. Defaults to None.
@@ -158,6 +165,8 @@ class UnifiedDataset(Dataset):
             transforms (Iterable[Callable], optional): Allows for custom modifications of batch elements. Each Callable must take in a filled {Agent,Scene}BatchElement and return a {Agent,Scene}BatchElement.
             rank (int, optional): Proccess rank when using torch DistributedDataParallel for multi-GPU training. Only the rank 0 process will be used for caching.
         """
+        self.model_desc = model_desc
+
         self.centric: str = centric
         self.desired_dt: float = desired_dt
 
@@ -340,6 +349,8 @@ class UnifiedDataset(Dataset):
         # of multiprocessing later on.
         del all_scenes_list
 
+        self.overall_desc = f"{self.model_desc}_{self.desired_dt}_{self.history_sec[1]}_{self.future_sec[1]}"
+
         data_index: Union[
             List[Tuple[str, int, np.ndarray]],
             List[Tuple[str, int, List[Tuple[str, np.ndarray]]]],
@@ -360,64 +371,82 @@ class UnifiedDataset(Dataset):
         )
         self._data_len: int = len(self._data_index)
 
-        self._cached_batch_elements = None
+        
+        self.preprocess(num_workers)
 
-    def load_or_create_cache(
-        self, cache_path: str, num_workers=0, filter_fn=None
+    def preprocess(
+        self, num_workers=0, filter_fn=None
     ) -> None:
-        if isfile(cache_path):
-            print(f"Loading cache from {cache_path} ...", end="")
-            t = time.time()
-            with open(cache_path, "rb") as f:
-                self._cached_batch_elements, keep_mask = dill.load(f, encoding="latin1")
-            print(f" done in {time.time() - t:.1f}s.")
+        print(f'Listing elements...')
+        self._processed_elements = []
+        for _data_i in self._data_index:
+            _data_path = Path(_data_i[0])
+            _data_aname = _data_i[1]
+            _data_ts = _data_i[2]
 
+            _data_dir = _data_path.parent.parent.name + '_' + self.overall_desc
+            _data_fname = _data_path.parent.name + '_' + _data_aname + '_' + str(_data_ts) + '.pt'
+
+            _data_elem = Path(self.cache_path, _data_dir, _data_fname)
+            self._processed_elements.append(_data_elem)
+        print(f'Assessing unprocessed files...')
+        unprocessed = [not _element.exists() for _element in self._processed_elements]
+        if sum(unprocessed) > 0:
+            print(f'Found {sum(unprocessed)} unprocessed files')
+            _unprocessed_elements = list(compress(self._processed_elements, unprocessed))
+            _unprocessed_data_index = list(compress(self._data_index, unprocessed))
+            _unprocessed_dict = dict(map(lambda i,j : (i,j) , _unprocessed_elements, _unprocessed_data_index))
+
+            _unprocessed_parents = list(set([_element.parent for _element in _unprocessed_elements]))
+            for _parent in _unprocessed_parents:
+                _parent.mkdir(exist_ok=True)
         else:
-            # Build cache
-            cached_batch_elements = []
-            keep_ids = []
-
+            print(f'Found all processed files')
+    
+        if sum(unprocessed) == 0:
+            pass
+        else:
             if num_workers <= 0:
-                cache_data_iterator = self
+                for _data_elem, _data_index in tqdm(_unprocessed_dict.items(), desc=f'Preprocessing {self.overall_desc}: '):
+                    data_element = self.get_orig_element(_data_index)
+                    torch.save(data_element, _data_elem)
             else:
-                # Use DataLoader as a generic multiprocessing framework.
-                # We set batchsize=1 and a custom collate function.
-                # In effect this will just call self.__getitem__ in parallel.
-                cache_data_iterator = DataLoader(
-                    self,
-                    batch_size=1,
-                    num_workers=num_workers,
-                    shuffle=False,
-                    collate_fn=lambda xlist: xlist[0],
-                )
+                # # dict(islice(_unprocessed_dict.items(), 2, 4))
+                # batch = 40
+                # pb = ProgressBar(len(_unprocessed_dict), f"Preprocessing {self.overall_desc} with batch size {batch}")
+                # pb_actor = pb.actor
 
-            for element in tqdm(
-                cache_data_iterator,
-                desc=f"Caching batch elements ({num_workers} CPUs): ",
-                disable=False,
-            ):
-                if filter_fn is None or filter_fn(element):
-                    cached_batch_elements.append(element)
-                    keep_ids.append(element.data_index)
+                # for i in range(0, len(_unprocessed_dict), batch):
+                #     self.preprocess_batch.remote(
+                #         self, dict(islice(_unprocessed_dict.items(), i, i+batch)), pb_actor
+                #     )
 
-            # Just deletes the variable cache_data_iterator,
-            # not self (in case it is set to that)!
-            del cache_data_iterator
+                # pb.print_until_done()
 
-            print(f"Saving cache to {cache_path} ....", end="")
-            t = time.time()
-            with open(cache_path, "wb") as f:
-                dill.dump((cached_batch_elements, keep_ids), f)
-            print(f" done in {time.time() - t:.1f}s.")
+                raw_file_list = []
+                total_num = len(_unprocessed_dict)
+                num_per_proc = int(np.ceil(total_num / num_workers))
+                for proc_id in range(num_workers):
+                    start = proc_id*num_per_proc
+                    end = min((proc_id+1)*num_per_proc, total_num)
+                    raw_file_list.append(dict(islice(_unprocessed_dict.items(), start, end)))
 
-            self._cached_batch_elements = cached_batch_elements
+                procs = []
+                for proc_id in range(num_workers):
+                    process = Process(target=self.preprocess_batch, args=(raw_file_list[proc_id],))
+                    process.daemon = True
+                    process.start()
+                    procs.append(process)
 
-        # Remove unwanted elements
-        self.remove_elements(keep_ids=keep_ids)
+                for proc in procs:
+                    proc.join()
 
-        # Verify
-        if len(self._cached_batch_elements) != self._data_len:
-            raise ValueError("Current data and cached data lengths do not match!")
+
+    def preprocess_batch(self, unprocessed_dict: Dict[Path,DataIndex]):
+        for _data_elem, _data_index in tqdm(unprocessed_dict.items(), desc=f'Preprocessing {self.overall_desc}: '):
+            data_element = self.get_orig_element(_data_index)
+            torch.save(data_element, _data_elem)
+
 
     def apply_filter(
         self,
@@ -501,13 +530,13 @@ class UnifiedDataset(Dataset):
         List[Tuple[str, int, List[Tuple[str, np.ndarray]]]],
     ]:
         # We're doing all this staticmethod malarkey so that multiprocessing
-        # doesn't copy the UnifiedDataset self object (which generally slows down the
+        # doesn't copy the ProcessedUnifiedDataset self object (which generally slows down the
         # rate of spinning up new processes and hogs memory).
         desc: str = f"Creating {self.centric.capitalize()} Data Index"
 
         if self.centric == "scene":
             data_index_fn = partial(
-                UnifiedDataset._get_data_index_scene,
+                ProcessedUnifiedDataset._get_data_index_scene,
                 only_types=self.only_types,
                 no_types=self.no_types,
                 history_sec=self.history_sec,
@@ -516,7 +545,7 @@ class UnifiedDataset(Dataset):
             )
         elif self.centric == "agent":
             data_index_fn = partial(
-                UnifiedDataset._get_data_index_agent,
+                ProcessedUnifiedDataset._get_data_index_agent,
                 incl_robot_future=self.incl_robot_future,
                 only_types=self.only_types,
                 only_predict=self.only_predict,
@@ -888,21 +917,11 @@ class UnifiedDataset(Dataset):
         for scene_idx in range(self.num_scenes()):
             yield self.get_scene(scene_idx)
 
-    def __iter__(self):
-        for i in range(len(self)):
-            yield self[i]
-
-    def __len__(self) -> int:
-        return self._data_len
-
-    def __getitem__(self, idx: int) -> Union[SceneBatchElement, AgentBatchElement]:
-        if self._cached_batch_elements is not None:
-            return self._cached_batch_elements[idx]
-
+    def get_orig_element(self, data_index):
         if self.centric == "scene":
-            scene_path, ts = self._data_index[idx]
+            scene_path, ts = data_index
         elif self.centric == "agent":
-            scene_path, agent_id, ts = self._data_index[idx]
+            scene_path, agent_id, ts = data_index
 
         scene: Scene = EnvCache.load(scene_path)
         scene_utils.enforce_desired_dt(scene, self.desired_dt)
@@ -922,7 +941,7 @@ class UnifiedDataset(Dataset):
 
             batch_element: SceneBatchElement = SceneBatchElement(
                 scene_cache,
-                idx,
+                -1,
                 scene_time,
                 self.history_sec,
                 self.future_sec,
@@ -950,7 +969,7 @@ class UnifiedDataset(Dataset):
 
             batch_element: AgentBatchElement = AgentBatchElement(
                 scene_cache,
-                idx,
+                -1,
                 scene_time_agent,
                 self.history_sec,
                 self.future_sec,
@@ -972,7 +991,17 @@ class UnifiedDataset(Dataset):
         for transform_fn in self.transforms:
             batch_element = transform_fn(batch_element)
 
-        if not self.vector_map_params.get("collate", False):
-            batch_element.vec_map = None
-
         return batch_element
+
+    def __iter__(self):
+        for i in range(len(self)):
+            yield self[i]
+
+    def __len__(self) -> int:
+        return self._data_len
+
+    def __getitem__(self, idx: int) -> Dict:
+        data = torch.load(self._processed_elements[idx])
+        return data
+
+        

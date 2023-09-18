@@ -100,7 +100,7 @@ class AgentBatchElement:
                 ]
             )
 
-        nearby_agents, self.neighbor_types_np = self.get_nearby_agents(
+        nearby_agents, self.neighbor_types_np, self.neighbor_names = self.get_nearby_agents(
             scene_time_agent, agent_info, distance_limit
         )
 
@@ -144,7 +144,7 @@ class AgentBatchElement:
         if incl_raster_map:
             self.map_name = map_name
             self.map_patch = self.get_agent_map_patch(raster_map_params)
-
+        
         self.vec_map: Optional[VectorMap] = None
         if map_api is not None:
             self.vec_map = map_api.get_map(
@@ -218,8 +218,9 @@ class AgentBatchElement:
 
         # Doing this here because the argsort above changes the order of agents.
         neighbor_types_np: np.ndarray = np.array([a.type.value for a in nearby_agents])
+        neighbor_names: np.ndarray = np.array([a.name for a in nearby_agents])
 
-        return nearby_agents, neighbor_types_np
+        return nearby_agents, neighbor_types_np, neighbor_names
 
     def get_neighbor_history(
         self,
