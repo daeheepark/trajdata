@@ -22,16 +22,16 @@ def main():
         incl_robot_future=True,
         incl_raster_map=True,
         raster_map_params={
-            "px_per_m": 2,
+            "px_per_m": 1,
             "map_size_px": 224,
             "offset_frac_xy": (-0.5, 0.0),
         },
         augmentations=[noise_hists],
         max_agent_num=20,
-        num_workers=4,
+        num_workers=0,
         verbose=True,
         data_dirs={  # Remember to change this to match your filesystem!
-            "nusc_mini": "~/datasets/nuScenes",
+            "nusc_mini": "datasets/nuScenes",
         },
     )
 
