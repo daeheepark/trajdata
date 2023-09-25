@@ -39,6 +39,8 @@ typing_extensions==4.3.0
 bokeh==2.4.3
 gym==0.25.0
 
+# l5kit version == 1.5.0
+
 # The reason why we separately install l5kit is:
 # l5kit is currently not maintained, but it requires numpy~=1.19.0 for some reason, 
 # which means installing it normally will downgrade numpy from its usual version (1.22.3) to 1.19.5.
