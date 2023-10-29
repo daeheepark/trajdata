@@ -116,7 +116,9 @@ class WaymoScenarios:
             splitted_dir.mkdir(parents=True)
 
         scenario_num: int = 0
-        for data in tqdm(dataset):
+        for di, data in enumerate(tqdm(dataset)):
+            if di % 80 != 0:  # There are too many samples in waymo, so make no overlap to maximize dataset representability
+                continue
             file_name: Path = (
                 splitted_dir / f"{self.name}_splitted_{scenario_num}.tfrecords"
             )
