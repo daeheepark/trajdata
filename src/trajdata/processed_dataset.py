@@ -23,10 +23,12 @@ import dill
 import ray
 import numpy as np
 import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
 from torch import distributed
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 import parmap
+import pickle
 
 from multiprocessing import Process, Pool
 
@@ -56,6 +58,8 @@ from trajdata.maps.map_api import MapAPI
 from trajdata.parallel import ParallelDatasetPreprocessor, scene_paths_collate_fn
 from trajdata.utils import agent_utils, env_utils, scene_utils, string_utils
 from trajdata.utils.parallel_utils import parallel_iapply
+
+
 
 # TODO(bivanovic): Move this to a better place in the codebase.
 DEFAULT_PX_PER_M: Final[float] = 2.0
@@ -392,7 +396,7 @@ class ProcessedUnifiedDataset(Dataset):
         print(f'Assessing unprocessed files...')
         unprocessed = [not _element.exists() for _element in self._processed_elements]
         if sum(unprocessed) > 0:
-            print(f'Found {sum(unprocessed)} unprocessed files')
+            print(f'Found {sum(unprocessed)} unprocessed files among {len(self._processed_elements)}')
             _unprocessed_elements = list(compress(self._processed_elements, unprocessed))
             _unprocessed_data_index = list(compress(self._data_index, unprocessed))
             _unprocessed_dict = dict(map(lambda i,j : (i,j) , _unprocessed_elements, _unprocessed_data_index))
@@ -409,7 +413,7 @@ class ProcessedUnifiedDataset(Dataset):
             if num_workers <= 0:
                 for _data_elem, _data_index in tqdm(_unprocessed_dict.items(), desc=f'Preprocessing {self.overall_desc}: '):
                     data_element = self.get_orig_element(_data_index)
-                    torch.save(data_element, _data_elem)
+                    torch.save(data_element, _data_elem, pickle_protocol=pickle.HIGHEST_PROTOCOL)
             else:
                 # # dict(islice(_unprocessed_dict.items(), 2, 4))
                 # batch = 40
@@ -445,7 +449,7 @@ class ProcessedUnifiedDataset(Dataset):
     def preprocess_batch(self, unprocessed_dict: Dict[Path,DataIndex]):
         for _data_elem, _data_index in tqdm(unprocessed_dict.items(), desc=f'Preprocessing {self.overall_desc}: '):
             data_element = self.get_orig_element(_data_index)
-            torch.save(data_element, _data_elem)
+            torch.save(data_element, _data_elem, pickle_protocol=pickle.HIGHEST_PROTOCOL)
 
 
     def apply_filter(
