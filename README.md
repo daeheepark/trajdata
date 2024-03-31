@@ -1,4 +1,4 @@
-# Unified Trajectory Data Loader
+# Unified Trajectory Data Loader - Customized for `T4P`(https://arxiv.org/abs/2403.10052)
 
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![Imports: isort](https://img.shields.io/badge/%20imports-isort-%231674b1?style=flat&labelColor=ef8336)](https://pycqa.github.io/isort/)
@@ -8,31 +8,9 @@
 
 ## Installation
 
-The easiest way to install trajdata is through PyPI with
-```sh
-pip install trajdata
-```
+Download the raw datasets (nuScenes, Lyft Level 5, ETH/UCY, etc.) in case you do not already have them. For more information about how to structure dataset folders/files, please see [`DATASETS.md`](./DATASETS.md).
 
-In case you would also like to use datasets such as nuScenes, Lyft Level 5, or Waymo Open Motion Dataset (which require their own devkits to access raw data or additional package dependencies), the following will also install the respective devkits and/or package dependencies.
-```sh
-# For nuScenes
-pip install "trajdata[nusc]"
-
-# For Lyft
-pip install "trajdata[lyft]"
-
-# For Waymo
-pip install "trajdata[waymo]"
-
-# For INTERACTION
-pip install "trajdata[interaction]"
-
-# All
-pip install "trajdata[nusc,lyft,waymo,interaction]"
-```
-Then, download the raw datasets (nuScenes, Lyft Level 5, ETH/UCY, etc.) in case you do not already have them. For more information about how to structure dataset folders/files, please see [`DATASETS.md`](./DATASETS.md).
-
-### Package Developer Installation
+### Installation
 
 First, in whichever environment you would like to use (conda, venv, ...), make sure to install all required dependencies with
 ```
